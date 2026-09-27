@@ -1,0 +1,6 @@
+{
+  "name": "GameHub - Android Game Publishing & Download Platform",
+  "description": "Discover, publish, and download high-performance Android games and APKs. Featuring real cloud storage, APK uploads, fast downloads, and detailed game metrics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
