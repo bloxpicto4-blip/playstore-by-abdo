@@ -16,10 +16,12 @@ import {
   Layers,
   Sparkles,
   RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { Game, GameCategory, GAME_CATEGORIES } from './types/game';
 import { getAllGames, getGameBySlug } from './services/gameService';
 import { getCurrentAdmin, logoutAdmin, AdminUser } from './services/authService';
+import { initSupabaseConfig } from './services/supabase';
 import { Navbar } from './components/layout/Navbar';
 import { Footer } from './components/layout/Footer';
 import { HeroSection } from './components/landing/HeroSection';
@@ -59,24 +61,58 @@ export default function App() {
   const [supabaseModalOpen, setSupabaseModalOpen] = useState(false);
   const [editingGame, setEditingGame] = useState<Game | null>(null);
 
-  // Load games from service
-  const loadGames = async () => {
+  // Load games from service:
+  // - Public visitors: loads published games only via anonymous public client
+  // - Admin users: loads all games including drafts
+  const loadGames = async (isAdmin?: boolean) => {
     setLoading(true);
-    const data = await getAllGames(false);
+    const userIsAdmin = isAdmin !== undefined ? isAdmin : Boolean(adminUser);
+    const data = await getAllGames(!userIsAdmin);
     setGames(data);
     setLoading(false);
   };
 
   // Initial authentication & data fetch
   useEffect(() => {
+    // Check URL parameters for direct link sharing (?game=slug or #game/slug)
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const gameParam = params.get('game');
+      const hash = window.location.hash;
+      const gameHash = hash.startsWith('#game/') ? hash.replace('#game/', '') : null;
+      const initialSlug = gameParam || gameHash;
+
+      if (initialSlug) {
+        setSelectedGameSlug(initialSlug);
+        setCurrentView('game-details');
+      }
+    } catch {}
+
     const init = async () => {
+      // 1. Initialize Supabase configuration across all devices
+      await initSupabaseConfig();
+
+      // 2. Check admin session
       const user = await getCurrentAdmin();
       setAdminUser(user);
       setAuthChecking(false);
-      await loadGames();
+
+      // 3. Load games: public visitors get published games only
+      await loadGames(Boolean(user));
     };
     init();
   }, []);
+
+  // Ensure game details page can fetch by slug directly if needed
+  useEffect(() => {
+    if (selectedGameSlug && !games.some((g) => g.slug === selectedGameSlug)) {
+      getGameBySlug(selectedGameSlug, !adminUser).then((found) => {
+        if (found) {
+          setGames((prev) => (prev.some((g) => g.id === found.id) ? prev : [found, ...prev]));
+        }
+      });
+    }
+  }, [selectedGameSlug, adminUser, games]);
 
   // Global keyboard shortcut for search (⌘K or Ctrl+K)
   useEffect(() => {
@@ -95,10 +131,16 @@ export default function App() {
     if (view === 'game-details' && slug) {
       setSelectedGameSlug(slug);
       setCurrentView('game-details');
+      try {
+        window.history.pushState(null, '', `?game=${encodeURIComponent(slug)}`);
+      } catch {}
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
       setSelectedGameSlug(null);
       setCurrentView(view as any);
+      try {
+        window.history.pushState(null, '', window.location.pathname);
+      } catch {}
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
@@ -106,11 +148,14 @@ export default function App() {
   const handleSelectGame = (slug: string) => {
     setSelectedGameSlug(slug);
     setCurrentView('game-details');
+    try {
+      window.history.pushState(null, '', `?game=${encodeURIComponent(slug)}`);
+    } catch {}
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Filter games for public views
-  const publishedGames = games.filter((g) => g.published);
+  // Filter games for public views: ONLY published games visible to public
+  const publishedGames = games.filter((g) => Boolean(g.published));
   const categoryCounts: Record<string, number> = {};
   publishedGames.forEach((g) => {
     categoryCounts[g.category] = (categoryCounts[g.category] || 0) + 1;
@@ -136,14 +181,17 @@ export default function App() {
       return (
         <div className="min-h-screen bg-neutral-950">
           <AdminLogin
-            onLoginSuccess={(user) => setAdminUser(user)}
+            onLoginSuccess={(user) => {
+              setAdminUser(user);
+              loadGames(true);
+            }}
             onBackToHome={() => handleNavigate('home')}
             onOpenSupabaseModal={() => setSupabaseModalOpen(true)}
           />
           <SupabaseModal
             isOpen={supabaseModalOpen}
             onClose={() => setSupabaseModalOpen(false)}
-            onConnectionChange={loadGames}
+            onConnectionChange={() => loadGames(false)}
           />
         </div>
       );
@@ -161,6 +209,7 @@ export default function App() {
           await logoutAdmin();
           setAdminUser(null);
           setCurrentView('home');
+          loadGames(false);
         }}
         onBackToWebsite={() => handleNavigate('home')}
       >
@@ -249,13 +298,31 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1">
-        {currentView === 'game-details' && activeGame ? (
-          <GameDetailsPage
-            game={activeGame}
-            allGames={publishedGames}
-            onBack={() => handleNavigate('home')}
-            onSelectGame={handleSelectGame}
-          />
+        {currentView === 'game-details' ? (
+          activeGame ? (
+            <GameDetailsPage
+              game={activeGame}
+              allGames={publishedGames}
+              onBack={() => handleNavigate('home')}
+              onSelectGame={handleSelectGame}
+            />
+          ) : loading ? (
+            <div className="max-w-7xl mx-auto px-4 py-24 text-center">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto text-emerald-500 mb-4" />
+              <p className="text-sm text-neutral-400">Loading game details...</p>
+            </div>
+          ) : (
+            <div className="max-w-7xl mx-auto px-4 py-24 text-center space-y-4">
+              <h2 className="text-xl font-bold text-white">Game Not Found</h2>
+              <p className="text-sm text-neutral-400">The requested game release is either unavailable or unpublished.</p>
+              <button
+                onClick={() => handleNavigate('games')}
+                className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-sm transition-all shadow-lg shadow-emerald-500/20 cursor-pointer"
+              >
+                Explore All Games
+              </button>
+            </div>
+          )
         ) : currentView === 'games' ? (
           /* All Games Browse View */
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8 animate-in fade-in duration-150">

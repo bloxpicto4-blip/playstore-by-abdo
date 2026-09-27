@@ -1,5 +1,5 @@
 import { Game, GameFormData } from '../types/game';
-import { getSupabaseClient, isSupabaseConfigured } from './supabase';
+import { getSupabaseClient, getPublicSupabaseClient, isSupabaseConfigured } from './supabase';
 import { uploadApkFile, uploadImageFile, deleteStorageFile } from './storageService';
 
 // Image assets generated for the platform
@@ -20,7 +20,7 @@ const LOCAL_GAMES_STORAGE_KEY = 'gamehub_published_games_v1';
 // Initial seed games with rich details
 const INITIAL_SEED_GAMES: Game[] = [
   {
-    id: 'game-cyber-velocity-99',
+    id: 'c9bf9e57-1685-4c89-bafb-ff5af830be8a',
     name: 'Cyber Velocity 2099',
     slug: 'cyber-velocity-2099',
     short_description: 'High-octane futuristic anti-gravity street racing through neon-drenched megacities.',
@@ -54,7 +54,7 @@ const INITIAL_SEED_GAMES: Game[] = [
     updated_at: new Date().toISOString(),
   },
   {
-    id: 'game-shadow-blade-ronin',
+    id: 'e2a1b945-8c76-4d23-9a3e-4b6c891e23f0',
     name: 'Shadow Blade: Cyber Ronin',
     slug: 'shadow-blade-cyber-ronin',
     short_description: 'Fast-paced precision hack-and-slash action RPG set in feudal cyber-dystopia.',
@@ -88,7 +88,7 @@ const INITIAL_SEED_GAMES: Game[] = [
     updated_at: new Date().toISOString(),
   },
   {
-    id: 'game-nebula-strike-vanguard',
+    id: 'f7c3d210-9b4e-4e67-8a12-5c3d4e6f7a8b',
     name: 'Nebula Strike: Vanguard',
     slug: 'nebula-strike-vanguard',
     short_description: 'Tactical sci-fi space combat and starfleet armada management across deep cosmos.',
@@ -117,6 +117,20 @@ const INITIAL_SEED_GAMES: Game[] = [
     updated_at: new Date().toISOString(),
   },
 ];
+
+// Helper to generate RFC4122 v4 UUID
+export const generateUUID = (): string => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    try {
+      return crypto.randomUUID();
+    } catch {}
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
 
 // Helper to generate a clean URL-safe slug from title
 export const generateSlug = (name: string): string => {
@@ -149,61 +163,110 @@ const saveLocalGames = (games: Game[]) => {
 };
 
 /**
- * Fetch all games (with optional filter for published only)
+ * Fetch all games:
+ * - Public visitors: queries Supabase using public anon client with published = true (no admin session required)
+ * - Admins: queries all games including drafts using authenticated client
  */
 export const getAllGames = async (publishedOnly = false): Promise<Game[]> => {
-  const supabase = getSupabaseClient();
-  if (isSupabaseConfigured() && supabase) {
+  if (isSupabaseConfigured()) {
     try {
-      let query = supabase.from('games').select('*').order('created_at', { ascending: false });
-      if (publishedOnly) {
-        query = query.eq('published', true);
-      }
-      const { data, error } = await query;
-      if (!error && data && data.length > 0) {
-        return data as Game[];
+      // For published games, use the independent public anon client
+      const supabase = publishedOnly 
+        ? getPublicSupabaseClient()
+        : getSupabaseClient();
+
+      if (supabase) {
+        let query = supabase.from('games').select('*').order('created_at', { ascending: false });
+        if (publishedOnly) {
+          query = query.eq('published', true);
+        }
+        const { data, error } = await query;
+        if (!error && Array.isArray(data) && data.length > 0) {
+          return data as Game[];
+        }
+        if (error) {
+          console.warn('Supabase query error:', error.message);
+        }
       }
     } catch (err) {
-      console.warn('Failed to fetch games from Supabase, using local state:', err);
+      console.warn('Failed to fetch games from Supabase client:', err);
+    }
+
+    // Try server endpoint fallback
+    try {
+      const endpoint = publishedOnly ? '/api/public/games' : '/api/admin/games';
+      const res = await fetch(endpoint);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          return data as Game[];
+        }
+      }
+    } catch {
+      // Backend route unreachable
     }
   }
 
+  // Fallback to local storage (e.g. offline / unconfigured Supabase)
   const localGames = getLocalGames();
   if (publishedOnly) {
-    return localGames.filter((g) => g.published);
+    return localGames.filter((g) => Boolean(g.published));
   }
   return localGames;
 };
 
 /**
- * Fetch a single game by its unique slug
+ * Fetch a single game by its unique slug:
+ * - Public visitors: requires published = true
+ * - Admins: can fetch drafts for preview
  */
-export const getGameBySlug = async (slug: string): Promise<Game | null> => {
-  const supabase = getSupabaseClient();
-  if (isSupabaseConfigured() && supabase) {
+export const getGameBySlug = async (slug: string, publishedOnly = true): Promise<Game | null> => {
+  if (isSupabaseConfigured()) {
     try {
-      const { data, error } = await supabase
-        .from('games')
-        .select('*')
-        .eq('slug', slug)
-        .single();
-      if (!error && data) {
-        return data as Game;
+      const supabase = publishedOnly 
+        ? getPublicSupabaseClient()
+        : getSupabaseClient();
+
+      if (supabase) {
+        let query = supabase.from('games').select('*').eq('slug', slug);
+        if (publishedOnly) {
+          query = query.eq('published', true);
+        }
+        const { data, error } = await query.maybeSingle();
+        if (!error && data) {
+          return data as Game;
+        }
       }
     } catch (err) {
       console.warn('Failed to fetch game by slug from Supabase:', err);
     }
+
+    // Server fallback
+    try {
+      const res = await fetch(`/api/public/games/${encodeURIComponent(slug)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.id) {
+          return data as Game;
+        }
+      }
+    } catch {}
   }
 
   const localGames = getLocalGames();
-  return localGames.find((g) => g.slug === slug) || null;
+  const found = localGames.find((g) => g.slug === slug);
+  if (found) {
+    if (publishedOnly && !found.published) return null;
+    return found;
+  }
+  return null;
 };
 
 /**
  * Increment game download count
  */
 export const incrementDownloadCount = async (gameId: string): Promise<number> => {
-  // Update local games first
+  // Update local games state first
   const localGames = getLocalGames();
   const index = localGames.findIndex((g) => g.id === gameId);
   let newCount = 1;
@@ -213,13 +276,20 @@ export const incrementDownloadCount = async (gameId: string): Promise<number> =>
     saveLocalGames(localGames);
   }
 
-  // Update Supabase if connected
-  const supabase = getSupabaseClient();
+  // 1. Try server endpoint
+  try {
+    const res = await fetch(`/api/games/${gameId}/download`, { method: 'POST' });
+    if (res.ok) return newCount;
+  } catch (e) {
+    // server route not reachable, continue to direct Supabase
+  }
+
+  // 2. Direct Supabase call (using public client with RPC increment_game_download)
+  const supabase = getPublicSupabaseClient() || getSupabaseClient();
   if (isSupabaseConfigured() && supabase) {
     try {
       await supabase.rpc('increment_game_download', { game_id: gameId });
     } catch (err) {
-      // Fallback update
       try {
         await supabase
           .from('games')
@@ -284,7 +354,7 @@ export const createGame = async (
     }
 
     const newGame: Game = {
-      id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `game-${Date.now()}`,
+      id: generateUUID(),
       name: formData.name.trim(),
       slug,
       short_description: formData.short_description.trim(),
@@ -304,23 +374,46 @@ export const createGame = async (
     };
 
     // Save to Supabase if configured
+    let savedToSupabase = false;
     const supabase = getSupabaseClient();
     if (isSupabaseConfigured() && supabase) {
       try {
-        const { data, error } = await supabase.from('games').insert(newGame).select().single();
-        if (error) {
-          console.warn('Failed to insert into Supabase games table:', error);
-        } else if (data) {
-          newGame.id = data.id;
+        let insertRes = await supabase.from('games').insert(newGame).select().single();
+        if (insertRes.error && (insertRes.error as any).code === '42703') {
+          const { apk_file_name, ...cleanPayload } = newGame;
+          insertRes = await supabase.from('games').insert(cleanPayload).select().single();
+        }
+        if (!insertRes.error && insertRes.data) {
+          newGame.id = insertRes.data.id;
+          savedToSupabase = true;
+        } else if (insertRes.error) {
+          console.warn('Direct Supabase insert error:', insertRes.error.message);
         }
       } catch (err) {
-        console.warn('Error saving to Supabase:', err);
+        console.warn('Error saving to Supabase directly:', err);
       }
+    }
+
+    // Server-side fallback (utilizing service role key if admin session is local)
+    if (!savedToSupabase) {
+      try {
+        const srvRes = await fetch('/api/admin/games', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newGame),
+        });
+        if (srvRes.ok) {
+          const srvData = await srvRes.json();
+          if (srvData.game?.id) {
+            newGame.id = srvData.game.id;
+            savedToSupabase = true;
+          }
+        }
+      } catch {}
     }
 
     // Always update local games for instantaneous UI responsiveness
     const localGames = getLocalGames();
-    // Check if slug exists in local
     const filtered = localGames.filter((g) => g.slug !== slug);
     filtered.unshift(newGame);
     saveLocalGames(filtered);
@@ -356,7 +449,6 @@ export const updateGame = async (
     // Handle APK replacement
     if (newApkFile) {
       const uploadRes = await uploadApkFile(newApkFile, current.slug, onApkProgress);
-      // Clean up old apk file
       if (current.apk_path && current.apk_path !== uploadRes.path) {
         await deleteStorageFile('games-apks', current.apk_path);
       }
@@ -378,13 +470,31 @@ export const updateGame = async (
     saveLocalGames(localGames);
 
     // Update in Supabase
+    let updatedInSupabase = false;
     const supabase = getSupabaseClient();
     if (isSupabaseConfigured() && supabase) {
       try {
-        await supabase.from('games').update(updatedGame).eq('id', gameId);
+        let updateRes = await supabase.from('games').update(updatedGame).eq('id', gameId);
+        if (updateRes.error && (updateRes.error as any).code === '42703') {
+          const { apk_file_name, ...cleanUpdates } = updatedGame;
+          updateRes = await supabase.from('games').update(cleanUpdates).eq('id', gameId);
+        }
+        if (!updateRes.error) {
+          updatedInSupabase = true;
+        }
       } catch (err) {
         console.warn('Supabase game update error:', err);
       }
+    }
+
+    if (!updatedInSupabase) {
+      try {
+        await fetch(`/api/admin/games/${gameId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedGame),
+        });
+      } catch {}
     }
 
     return { success: true, game: updatedGame };
@@ -421,13 +531,23 @@ export const deleteGame = async (gameId: string): Promise<{ success: boolean; er
     }
 
     // Remove from Supabase
+    let deletedFromSupabase = false;
     const supabase = getSupabaseClient();
     if (isSupabaseConfigured() && supabase) {
       try {
-        await supabase.from('games').delete().eq('id', gameId);
+        const delRes = await supabase.from('games').delete().eq('id', gameId);
+        if (!delRes.error) {
+          deletedFromSupabase = true;
+        }
       } catch (err) {
         console.warn('Supabase game delete error:', err);
       }
+    }
+
+    if (!deletedFromSupabase) {
+      try {
+        await fetch(`/api/admin/games/${gameId}`, { method: 'DELETE' });
+      } catch {}
     }
 
     // Remove from local storage

@@ -27,19 +27,46 @@ export const SupabaseSettings: React.FC<SupabaseSettingsProps> = ({ onConnection
   const currentConfig = getSupabaseConfig();
   const [url, setUrl] = useState(currentConfig.supabaseUrl);
   const [key, setKey] = useState(currentConfig.supabaseAnonKey);
+  const [serviceRoleKey, setServiceRoleKey] = useState('');
+  const [hasServerKey, setHasServerKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [copiedSql, setCopiedSql] = useState(false);
   const [copiedEnv, setCopiedEnv] = useState(false);
 
   useEffect(() => {
+    // Check if server already has config & service role key
+    fetch('/api/config')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.supabaseUrl && !url) setUrl(data.supabaseUrl);
+        if (data.supabaseAnonKey && !key) setKey(data.supabaseAnonKey);
+        if (data.hasServiceRoleKey) setHasServerKey(true);
+      })
+      .catch(() => {});
+
     if (isSupabaseConfigured()) {
       handleTestConnection();
     }
   }, []);
 
-  const handleSave = () => {
-    setSupabaseConfig(url.trim(), key.trim());
+  const handleSave = async () => {
+    setSupabaseConfig(url.trim(), key.trim(), true);
+    try {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          supabaseUrl: url.trim(),
+          supabaseAnonKey: key.trim(),
+          ...(serviceRoleKey.trim() ? { supabaseServiceRoleKey: serviceRoleKey.trim() } : {}),
+        }),
+      });
+      if (serviceRoleKey.trim()) setHasServerKey(true);
+    } catch (err) {
+      console.warn('Error saving to server /api/config:', err);
+    }
+
     onConnectionChange?.();
     handleTestConnection();
   };

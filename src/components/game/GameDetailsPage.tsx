@@ -79,7 +79,8 @@ export const GameDetailsPage: React.FC<GameDetailsPageProps> = ({
 
   const handleShare = () => {
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(window.location.href);
+      const shareUrl = `${window.location.origin}${window.location.pathname}?game=${encodeURIComponent(game.slug)}`;
+      navigator.clipboard.writeText(shareUrl);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     }

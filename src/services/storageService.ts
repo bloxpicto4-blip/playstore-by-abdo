@@ -247,22 +247,74 @@ export const downloadRealApk = async (
   try {
     const fileName = `${gameName.replace(/[^a-zA-Z0-9_-]/g, '_')}_v${version}.apk`;
 
-    // 1. Try Supabase Storage first if configured
-    const supabase = getSupabaseClient();
-    if (isSupabaseConfigured() && supabase && !apkPath.startsWith('local-apk://') && !apkPath.startsWith('blob:')) {
-      const { data, error } = await supabase.storage.from('games-apks').download(apkPath);
-      if (!error && data) {
-        triggerBlobDownload(data, fileName);
-        return { success: true };
+    // 1. Try server-signed URL first (secure signed access for private games-apks bucket)
+    if (!apkPath.startsWith('local-apk://') && !apkPath.startsWith('blob:')) {
+      try {
+        const signRes = await fetch('/api/apk/signed-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apkPath, gameName, version }),
+        });
+
+        if (signRes.ok) {
+          const { signedUrl } = await signRes.json();
+          if (signedUrl) {
+            try {
+              const res = await fetch(signedUrl);
+              if (res.ok) {
+                const blob = await res.blob();
+                triggerBlobDownload(blob, fileName);
+                return { success: true };
+              }
+            } catch {
+              // Direct anchor download fallback
+              const a = document.createElement('a');
+              a.href = signedUrl;
+              a.download = fileName;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              return { success: true };
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Server signed-url endpoint not available, trying client signed URL:', err);
       }
-      
-      // If direct download didn't return a blob, check public URL
-      const { data: urlData } = supabase.storage.from('games-apks').getPublicUrl(apkPath);
-      if (urlData?.publicUrl) {
-        const res = await fetch(urlData.publicUrl);
-        if (res.ok) {
-          const blob = await res.blob();
-          triggerBlobDownload(blob, fileName);
+
+      // 2. Direct Supabase Storage signed URL or download
+      const supabase = getSupabaseClient();
+      if (isSupabaseConfigured() && supabase) {
+        const cleanPath = apkPath.replace('local-apk://', '');
+        
+        // Request signed URL from Supabase Storage (120 seconds expiry)
+        const { data: signedData } = await supabase.storage
+          .from('games-apks')
+          .createSignedUrl(cleanPath, 120, { download: fileName });
+
+        if (signedData?.signedUrl) {
+          try {
+            const res = await fetch(signedData.signedUrl);
+            if (res.ok) {
+              const blob = await res.blob();
+              triggerBlobDownload(blob, fileName);
+              return { success: true };
+            }
+          } catch {
+            const a = document.createElement('a');
+            a.href = signedData.signedUrl;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            return { success: true };
+          }
+        }
+
+        // Direct stream download attempt
+        const { data, error } = await supabase.storage.from('games-apks').download(cleanPath);
+        if (!error && data) {
+          triggerBlobDownload(data, fileName);
           return { success: true };
         }
       }
